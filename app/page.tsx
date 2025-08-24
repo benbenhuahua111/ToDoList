@@ -37,7 +37,7 @@ export default async function Home() {
             )}
           </div>
 
-          <TodoApp />
+          <TodoApp user={user} />
         </div>
       </div>
     </div>
