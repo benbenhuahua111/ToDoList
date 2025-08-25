@@ -50,3 +50,6 @@ USING (auth.uid() = user_id);
 
 -- 创建索引以提高查询性能
 CREATE INDEX idx_todos_user_id ON todos(user_id);
+
+-- 启用 Realtime 功能
+ALTER PUBLICATION supabase_realtime ADD TABLE todos;

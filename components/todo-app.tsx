@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Circle, Plus, Trash2, Pencil, X, Camera, Image } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { getTodos, createTodo, updateTodo, deleteTodo, toggleTodo } from "@/lib/todos";
+import { createTodo, updateTodo, deleteTodo, toggleTodo } from "@/lib/todos";
 import { uploadImage, deleteImage, validateImageFile } from "@/lib/storage";
+import { useRealtimeTodos } from "@/lib/use-realtime-todos";
 import type { Todo } from "@/lib/types";
 
 type User = {
@@ -19,37 +20,15 @@ interface TodoAppProps {
 
 export default function TodoApp({ user }: TodoAppProps) {
   const router = useRouter();
-  const [todos, setTodos] = useState<Todo[]>([]);
+  const { todos, isLoading, updateLocalTodos } = useRealtimeTodos(user);
   const [newTodo, setNewTodo] = useState("");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editText, setEditText] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [uploadingImage, setUploadingImage] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // 加载用户的todos
-  useEffect(() => {
-    if (user) {
-      loadTodos();
-    }
-  }, [user]);
-
-  const loadTodos = async () => {
-    if (!user) return;
-    
-    try {
-      setIsLoading(true);
-      const userTodos = await getTodos();
-      setTodos(userTodos);
-    } catch (error) {
-      console.error('Error loading todos:', error);
-      // 可以在这里添加错误提示
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   // 处理图片选择
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -93,7 +72,7 @@ export default function TodoApp({ user }: TodoAppProps) {
     if (!newTodo.trim()) return;
     
     try {
-      setIsLoading(true);
+      setIsSubmitting(true);
       let imageUrl: string | undefined;
       
       // 如果有选中的图片，先上传图片
@@ -102,13 +81,14 @@ export default function TodoApp({ user }: TodoAppProps) {
         imageUrl = await uploadImage(selectedImage, user.id);
       }
       
-      const newTodoItem = await createTodo({
+      // 创建todo - Realtime会自动处理UI更新
+      await createTodo({
         text: newTodo,
         user_id: user.id,
         ...(imageUrl && { image_url: imageUrl })
       });
       
-      setTodos([newTodoItem, ...todos]);
+      // 清空输入
       setNewTodo("");
       clearSelectedImage();
     } catch (error) {
@@ -116,7 +96,7 @@ export default function TodoApp({ user }: TodoAppProps) {
       const errorMessage = error instanceof Error ? error.message : '添加Todo失败，请重试';
       alert(errorMessage);
     } finally {
-      setIsLoading(false);
+      setIsSubmitting(false);
       setUploadingImage(false);
     }
   };
@@ -127,11 +107,21 @@ export default function TodoApp({ user }: TodoAppProps) {
     const todo = todos.find(t => t.id === id);
     if (!todo) return;
     
+    // 乐观更新
+    updateLocalTodos(currentTodos =>
+      currentTodos.map(t => t.id === id ? { ...t, completed: !t.completed } : t)
+    );
+    
     try {
-      const updatedTodo = await toggleTodo(id, !todo.completed);
-      setTodos(todos.map(t => t.id === id ? updatedTodo : t));
+      // 更新数据库 - Realtime会处理其他设备的同步
+      await toggleTodo(id, !todo.completed);
     } catch (error) {
       console.error('Error toggling todo:', error);
+      // 回滚乐观更新
+      updateLocalTodos(currentTodos =>
+        currentTodos.map(t => t.id === id ? { ...t, completed: todo.completed } : t)
+      );
+      alert('更新失败，请重试');
     }
   };
 
@@ -141,16 +131,23 @@ export default function TodoApp({ user }: TodoAppProps) {
     const todo = todos.find(t => t.id === id);
     if (!todo) return;
     
+    // 乐观更新 - 先从UI中移除
+    const originalTodos = todos;
+    updateLocalTodos(currentTodos => currentTodos.filter(t => t.id !== id));
+    
     try {
       // 如果有图片，先删除图片
       if (todo.image_url) {
         await deleteImage(todo.image_url, user.id);
       }
       
+      // 删除数据库记录 - Realtime会处理其他设备的同步
       await deleteTodo(id);
-      setTodos(todos.filter(todo => todo.id !== id));
     } catch (error) {
       console.error('Error deleting todo:', error);
+      // 回滚乐观更新
+      updateLocalTodos(() => originalTodos);
+      alert('删除失败，请重试');
     }
   };
 
@@ -162,18 +159,34 @@ export default function TodoApp({ user }: TodoAppProps) {
   const saveEdit = async () => {
     if (!editText.trim() || !editingId || !user) return;
     
+    const originalText = todos.find(t => t.id === editingId)?.text;
+    
+    // 乐观更新
+    updateLocalTodos(currentTodos =>
+      currentTodos.map(todo =>
+        todo.id === editingId ? { ...todo, text: editText } : todo
+      )
+    );
+    
+    // 立即退出编辑模式
+    setEditingId(null);
+    setEditText("");
+    
     try {
-      const updatedTodo = await updateTodo({
+      // 更新数据库 - Realtime会处理其他设备的同步
+      await updateTodo({
         id: editingId,
         text: editText
       });
-      setTodos(todos.map(todo =>
-        todo.id === editingId ? updatedTodo : todo
-      ));
-      setEditingId(null);
-      setEditText("");
     } catch (error) {
       console.error('Error updating todo:', error);
+      // 回滚乐观更新
+      updateLocalTodos(currentTodos =>
+        currentTodos.map(todo =>
+          todo.id === editingId ? { ...todo, text: originalText || '' } : todo
+        )
+      );
+      alert('更新失败，请重试');
     }
   };
 
@@ -204,10 +217,10 @@ export default function TodoApp({ user }: TodoAppProps) {
             </button>
             <button
               type="submit"
-              disabled={isLoading || uploadingImage}
+              disabled={isSubmitting || uploadingImage}
               className="p-2 rounded-lg bg-white/20 hover:bg-white/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 text-white"
             >
-              {uploadingImage ? (
+              {uploadingImage || isSubmitting ? (
                 <div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
               ) : (
                 <Plus className="w-6 h-6" />
